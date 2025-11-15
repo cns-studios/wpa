@@ -7,6 +7,8 @@ from typing import Optional, Dict, Tuple
 from bs4 import BeautifulSoup
 from diff_match_patch import diff_match_patch
 import hashlib
+import base64
+from urllib.parse import urljoin, urlparse
 
 
 class WebPageArchiver:
@@ -91,30 +93,78 @@ class WebPageArchiver:
         soup = BeautifulSoup(html, 'html.parser')
         
         # Remove scripts from ad domains
-        for script in soup.find_all('script', src=True):
+        for script in list(soup.find_all('script', src=True)):
             if any(domain in script['src'] for domain in self.AD_DOMAINS):
                 script.decompose()
         
         # Remove iframes from ad domains
-        for iframe in soup.find_all('iframe', src=True):
+        for iframe in list(soup.find_all('iframe', src=True)):
             if any(domain in iframe['src'] for domain in self.AD_DOMAINS):
                 iframe.decompose()
         
         # Remove elements with ad-related classes/ids
-        for element in soup.find_all(class_=True):
-            classes = element.get('class', [])
-            if any(ad_class in ' '.join(classes).lower() for ad_class in self.AD_CLASSES):
-                element.decompose()
+        for element in list(soup.find_all(class_=True)):
+            if element and element.parent and element.has_attr('class'):
+                classes = element.get('class', [])
+                if any(ad_class in ' '.join(classes).lower() for ad_class in self.AD_CLASSES):
+                    element.decompose()
         
-        for element in soup.find_all(id=True):
-            if any(ad_class in element.get('id', '').lower() for ad_class in self.AD_CLASSES):
-                element.decompose()
+        for element in list(soup.find_all(id=True)):
+            if element and element.parent and element.has_attr('id'):
+                if any(ad_class in element.get('id', '').lower() for ad_class in self.AD_CLASSES):
+                    element.decompose()
         
         # Remove common ad containers
         for tag in ['ins', 'ad', 'advertisement']:
-            for element in soup.find_all(tag):
+            for element in list(soup.find_all(tag)):
                 element.decompose()
         
+        return str(soup)
+
+    def _get_asset_content(self, url: str) -> Optional[Tuple[bytes, str]]:
+        """Fetch asset content and return as (data, mime_type)."""
+        try:
+            response = requests.get(url, timeout=15)
+            if response.status_code == 200:
+                return response.content, response.headers.get('Content-Type', '')
+        except requests.RequestException as e:
+            print(f"Failed to fetch asset {url}: {e}")
+        return None
+
+    def _embed_assets(self, html: str, page_url: str) -> str:
+        """Embed external CSS, JS, and images as data URIs."""
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # Embed CSS
+        for link in soup.find_all('link', rel='stylesheet'):
+            css_url = urljoin(page_url, link['href'])
+            asset = self._get_asset_content(css_url)
+            if asset:
+                css_content, _ = asset
+                style_tag = soup.new_tag('style')
+                style_tag.string = css_content.decode('utf-8')
+                link.replace_with(style_tag)
+
+        # Embed JS
+        for script in soup.find_all('script', src=True):
+            js_url = urljoin(page_url, script['src'])
+            asset = self._get_asset_content(js_url)
+            if asset:
+                js_content, _ = asset
+                script.string = js_content.decode('utf-8')
+                del script['src']
+
+        # Embed images
+        for img in soup.find_all('img', src=True):
+            img_url = urljoin(page_url, img['src'])
+            if not urlparse(img_url).scheme:
+                continue # Skip relative paths that don't resolve
+
+            asset = self._get_asset_content(img_url)
+            if asset:
+                img_data, mime_type = asset
+                img['src'] = f"data:{mime_type};base64,{base64.b64encode(img_data).decode('utf-8')}"
+
         return str(soup)
     
     def fetch_page(self, url: str, etag: Optional[str] = None, 
@@ -238,6 +288,8 @@ class WebPageArchiver:
         # Strip ads if requested
         if strip_ads:
             content = self._strip_ads(content)
+
+        content = self._embed_assets(content, url)
         
         # Check if content actually changed (hash comparison)
         content_hash = self._hash_content(content)
@@ -384,6 +436,31 @@ class WebPageArchiver:
         
         conn.close()
         return history
+
+    def get_all_pages(self) -> list:
+        """Get all monitored pages with version counts."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT p.id, p.url, p.created_at, COUNT(v.id) as version_count
+            FROM pages p
+            LEFT JOIN versions v ON p.id = v.page_id
+            GROUP BY p.id
+            ORDER BY p.created_at DESC
+        ''')
+
+        pages = []
+        for row in cursor.fetchall():
+            pages.append({
+                'id': row[0],
+                'url': row[1],
+                'created_at': row[2],
+                'versions': row[3]
+            })
+
+        conn.close()
+        return pages
     
     def compare_versions(self, url: str, version1: int, version2: int) -> str:
         """Get a unified diff between two versions."""
@@ -462,10 +539,16 @@ def main():
     if history:
         print(f"\n📖 Retrieving version 1 content (first 500 chars):")
         print("-" * 70)
-        content = archiver.get_version_content(result['page_id'], 1)
+        page_id = archiver._get_page_id(test_url)
+        content = archiver.get_version_content(page_id, 1)
         if content:
             print(content[:500])
             print("...")
+            # Verify asset embedding
+            if "data:image" in content:
+                print("\n✓ Image embedding verified.")
+            if "<style>" in content:
+                print("✓ CSS embedding verified.")
 
 
 if __name__ == '__main__':
