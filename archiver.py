@@ -85,6 +85,18 @@ class WebPageArchiver:
                 CREATE INDEX IF NOT EXISTS idx_page_versions
                 ON versions(page_id, version_number DESC)
             ''')
+
+            # Table for tracking page relationships (e.g., parent/child for subdomains)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS page_relationships (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    parent_page_id INTEGER NOT NULL,
+                    child_page_id INTEGER NOT NULL,
+                    FOREIGN KEY (parent_page_id) REFERENCES pages(id),
+                    FOREIGN KEY (child_page_id) REFERENCES pages(id),
+                    UNIQUE(parent_page_id, child_page_id)
+                )
+            ''')
     
     def _compress(self, data: str) -> bytes:
         """Compress string data using gzip."""
@@ -255,16 +267,33 @@ class WebPageArchiver:
                 }
             return None
     
-    def archive_page(self, url: str, strip_ads: bool = True) -> Dict:
+    def archive_page(self, url: str, strip_ads: bool = True, parent_id: Optional[int] = None, visited_urls: set = None) -> Dict:
         """
         Archive a page, storing only the delta if it changed.
         
         Returns:
             Dictionary with archival status and details
         """
+        if visited_urls is None:
+            visited_urls = set()
+
+        if url in visited_urls:
+            print(f"  -> Skipping already visited URL: {url}")
+            return {'status': 'skipped', 'message': 'URL already visited in this session'}
+
+        visited_urls.add(url)
+
         page_id = self._get_page_id(url)
         latest = self._get_latest_version(page_id)
         
+        # If there's a parent, establish the relationship
+        if parent_id:
+            with self._connect() as cursor:
+                cursor.execute(
+                    'INSERT OR IGNORE INTO page_relationships (parent_page_id, child_page_id) VALUES (?, ?)',
+                    (parent_id, page_id)
+                )
+
         # Fetch with conditional GET
         etag = latest['etag'] if latest else None
         last_modified = latest['last_modified'] if latest else None
@@ -292,6 +321,9 @@ class WebPageArchiver:
         if strip_ads:
             content = self._strip_ads(content)
 
+        # Discover and archive subdomains before embedding assets
+        content = self._discover_and_archive_subdomains(content, url, page_id, visited_urls)
+
         content = self._embed_assets(content, url)
         
         # Check if content actually changed (hash comparison)
@@ -306,6 +338,29 @@ class WebPageArchiver:
         
         # Store the new version
         return self._store_version(page_id, content, metadata, latest)
+
+    def _discover_and_archive_subdomains(self, html: str, page_url: str, parent_id: int, visited_urls: set) -> str:
+        """Discover, archive, and rewrite links to subdomains."""
+        soup = BeautifulSoup(html, 'html.parser')
+        base_domain = urlparse(page_url).netloc
+
+        for a_tag in soup.find_all('a', href=True):
+            link = a_tag['href']
+            abs_link = urljoin(page_url, link)
+            link_domain = urlparse(abs_link).netloc
+
+            # Check if it's a subdomain and not the same domain
+            if link_domain.endswith(base_domain) and link_domain != base_domain:
+                print(f"  -> Found subdomain: {abs_link}")
+
+                # Archive the subdomain page
+                sub_page_id = self._get_page_id(abs_link)
+                self.archive_page(abs_link, parent_id=parent_id, visited_urls=visited_urls)
+
+                # Rewrite the link to point to the local archive
+                a_tag['href'] = f"/site/{sub_page_id}"
+
+        return str(soup)
     
     def _store_version(self, page_id: int, content: str, 
                        metadata: Dict, latest: Optional[Dict]) -> Dict:
@@ -462,6 +517,18 @@ class WebPageArchiver:
                     'created_at': result[2]
                 }
             return None
+
+    def get_child_pages(self, page_id: int) -> list:
+        """Get all child pages for a given parent page."""
+        with self._connect() as cursor:
+            cursor.execute('''
+                SELECT p.id, p.url
+                FROM pages p
+                JOIN page_relationships pr ON p.id = pr.child_page_id
+                WHERE pr.parent_page_id = ?
+            ''', (page_id,))
+
+            return [{'id': row[0], 'url': row[1]} for row in cursor.fetchall()]
 
     def compare_versions(self, url: str, version1: int, version2: int) -> str:
         """Get a unified diff between two versions."""

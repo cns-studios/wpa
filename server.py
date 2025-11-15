@@ -17,7 +17,8 @@ def index():
 def site(page_id):
     page = archiver.get_page_by_id(page_id)
     history = archiver.get_version_history(page['url'])
-    return render_template('site.html', page=page, history=history)
+    children = archiver.get_child_pages(page_id)
+    return render_template('site.html', page=page, history=history, children=children)
 
 @app.route('/site/<int:page_id>/version/<int:version>')
 def version(page_id, version):
