@@ -8,7 +8,6 @@ archiver = WebPageArchiver('my_archive.db')
 urls_to_monitor = [
     'https://example.com',
     'https://news.ycombinator.com',
-    # Add your URLs here
 ]
 
 print("=" * 70)
