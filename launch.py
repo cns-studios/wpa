@@ -19,7 +19,7 @@ for url in urls_to_monitor:
     print(f"\n📄 Archiving: {url}")
     print("-" * 70)
     
-    result = archiver.archive_page(url, strip_ads=True, visited_urls=set())
+    result = archiver.archive_page(url, strip_ads=True, visited_urls=set(), max_depth=1)
     
     print(f"Status: {result['status']}")
     
