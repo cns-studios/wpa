@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ page.url }} - Versions</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1><a href="/">Web Archiver</a> &gt; {{ page.url }}</h1>
+        <h2>Version History</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Version</th>
+                    <th>Timestamp</th>
+                    <th>Type</th>
+                    <th>Size (bytes)</th>
+                    <th>View</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for ver in history %}
+                <tr>
+                    <td>{{ ver.version }}</td>
+                    <td>{{ ver.timestamp }}</td>
+                    <td>{{ ver.type }}</td>
+                    <td>{{ ver.stored_size }}</td>
+                    <td><a href="{{ url_for('version', page_id=page.id, version=ver.version) }}" target="_blank">View</a></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</body>
+</html>

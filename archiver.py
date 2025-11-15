@@ -2,6 +2,7 @@ import requests
 import sqlite3
 import gzip
 import json
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Optional, Dict, Tuple
 from bs4 import BeautifulSoup
@@ -29,52 +30,61 @@ class WebPageArchiver:
         'promo', 'advert', 'ad-container', 'google-ad'
     ]
     
-    def __init__(self, db_path: str = 'web_archive.db'):
+    def __init__(self, db_path: str = 'websites.db'):
         """Initialize the archiver with a database."""
         self.db_path = db_path
         self.dmp = diff_match_patch()
         self._init_database()
     
+    @contextmanager
+    def _connect(self):
+        """Context manager for database connections."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            yield conn.cursor()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def _init_database(self):
         """Create database schema for storing page versions."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Table for tracking pages
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS pages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                url TEXT UNIQUE NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Table for storing versions
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS versions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                page_id INTEGER NOT NULL,
-                version_number INTEGER NOT NULL,
-                is_base BOOLEAN DEFAULT 0,
-                content BLOB,  -- Compressed full content (base) or patch
-                content_hash TEXT,
-                etag TEXT,
-                last_modified TEXT,
-                http_status INTEGER,
-                fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (page_id) REFERENCES pages(id),
-                UNIQUE(page_id, version_number)
-            )
-        ''')
-        
-        # Index for faster lookups
-        cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_page_versions 
-            ON versions(page_id, version_number DESC)
-        ''')
-        
-        conn.commit()
-        conn.close()
+        with self._connect() as cursor:
+
+            # Table for tracking pages
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS pages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    url TEXT UNIQUE NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Table for storing versions
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    page_id INTEGER NOT NULL,
+                    version_number INTEGER NOT NULL,
+                    is_base BOOLEAN DEFAULT 0,
+                    content BLOB,  -- Compressed full content (base) or patch
+                    content_hash TEXT,
+                    etag TEXT,
+                    last_modified TEXT,
+                    http_status INTEGER,
+                    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (page_id) REFERENCES pages(id),
+                    UNIQUE(page_id, version_number)
+                )
+            ''')
+
+            # Index for faster lookups
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_page_versions
+                ON versions(page_id, version_number DESC)
+            ''')
     
     def _compress(self, data: str) -> bytes:
         """Compress string data using gzip."""
@@ -211,46 +221,39 @@ class WebPageArchiver:
     
     def _get_page_id(self, url: str) -> int:
         """Get or create page ID for URL."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT id FROM pages WHERE url = ?', (url,))
-        result = cursor.fetchone()
-        
-        if result:
-            page_id = result[0]
-        else:
-            cursor.execute('INSERT INTO pages (url) VALUES (?)', (url,))
-            page_id = cursor.lastrowid
-            conn.commit()
-        
-        conn.close()
-        return page_id
+        with self._connect() as cursor:
+            cursor.execute('SELECT id FROM pages WHERE url = ?', (url,))
+            result = cursor.fetchone()
+
+            if result:
+                page_id = result[0]
+            else:
+                cursor.execute('INSERT INTO pages (url) VALUES (?)', (url,))
+                page_id = cursor.lastrowid
+
+            return page_id
     
     def _get_latest_version(self, page_id: int) -> Optional[Dict]:
         """Get the latest version metadata for a page."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT version_number, etag, last_modified, content_hash
-            FROM versions
-            WHERE page_id = ?
-            ORDER BY version_number DESC
-            LIMIT 1
-        ''', (page_id,))
-        
-        result = cursor.fetchone()
-        conn.close()
-        
-        if result:
-            return {
-                'version_number': result[0],
-                'etag': result[1],
-                'last_modified': result[2],
-                'content_hash': result[3]
-            }
-        return None
+        with self._connect() as cursor:
+            cursor.execute('''
+                SELECT version_number, etag, last_modified, content_hash
+                FROM versions
+                WHERE page_id = ?
+                ORDER BY version_number DESC
+                LIMIT 1
+            ''', (page_id,))
+
+            result = cursor.fetchone()
+
+            if result:
+                return {
+                    'version_number': result[0],
+                    'etag': result[1],
+                    'last_modified': result[2],
+                    'content_hash': result[3]
+                }
+            return None
     
     def archive_page(self, url: str, strip_ads: bool = True) -> Dict:
         """
@@ -307,9 +310,6 @@ class WebPageArchiver:
     def _store_version(self, page_id: int, content: str, 
                        metadata: Dict, latest: Optional[Dict]) -> Dict:
         """Store a new version as base or delta."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
         version_number = 1 if not latest else latest['version_number'] + 1
         is_base = (version_number == 1)
         
@@ -327,18 +327,16 @@ class WebPageArchiver:
         
         content_hash = self._hash_content(content)
         
-        cursor.execute('''
-            INSERT INTO versions 
-            (page_id, version_number, is_base, content, content_hash, 
-             etag, last_modified, http_status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            page_id, version_number, is_base, compressed_content, content_hash,
-            metadata.get('etag'), metadata.get('last_modified'), metadata['status']
-        ))
-        
-        conn.commit()
-        conn.close()
+        with self._connect() as cursor:
+            cursor.execute('''
+                INSERT INTO versions
+                (page_id, version_number, is_base, content, content_hash,
+                 etag, last_modified, http_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                page_id, version_number, is_base, compressed_content, content_hash,
+                metadata.get('etag'), metadata.get('last_modified'), metadata['status']
+            ))
         
         original_size = len(content.encode('utf-8'))
         compressed_size = len(compressed_content)
@@ -359,39 +357,34 @@ class WebPageArchiver:
         """
         Reconstruct content for a specific version by applying patches.
         """
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Get base version
-        cursor.execute('''
-            SELECT content FROM versions
-            WHERE page_id = ? AND is_base = 1
-            ORDER BY version_number ASC
-            LIMIT 1
-        ''', (page_id,))
-        
-        base_result = cursor.fetchone()
-        if not base_result:
-            conn.close()
-            return None
-        
-        content = self._decompress(base_result[0])
-        
-        # If requesting base version, return it
-        if version_number == 1:
-            conn.close()
-            return content
-        
-        # Get all patches up to requested version
-        cursor.execute('''
-            SELECT version_number, content, is_base
-            FROM versions
-            WHERE page_id = ? AND version_number > 1 AND version_number <= ?
-            ORDER BY version_number ASC
-        ''', (page_id, version_number))
-        
-        patches_data = cursor.fetchall()
-        conn.close()
+        with self._connect() as cursor:
+            # Get base version
+            cursor.execute('''
+                SELECT content FROM versions
+                WHERE page_id = ? AND is_base = 1
+                ORDER BY version_number ASC
+                LIMIT 1
+            ''', (page_id,))
+
+            base_result = cursor.fetchone()
+            if not base_result:
+                return None
+
+            content = self._decompress(base_result[0])
+
+            # If requesting base version, return it
+            if version_number == 1:
+                return content
+
+            # Get all patches up to requested version
+            cursor.execute('''
+                SELECT version_number, content, is_base
+                FROM versions
+                WHERE page_id = ? AND version_number > 1 AND version_number <= ?
+                ORDER BY version_number ASC
+            ''', (page_id, version_number))
+
+            patches_data = cursor.fetchall()
         
         # Apply patches sequentially
         for ver_num, patch_data, is_base in patches_data:
@@ -410,58 +403,66 @@ class WebPageArchiver:
     
     def get_version_history(self, url: str) -> list:
         """Get version history for a URL."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT v.version_number, v.is_base, v.http_status, 
-                   v.fetched_at, v.content_hash,
-                   LENGTH(v.content) as stored_size
-            FROM versions v
-            JOIN pages p ON v.page_id = p.id
-            WHERE p.url = ?
-            ORDER BY v.version_number DESC
-        ''', (url,))
-        
-        history = []
-        for row in cursor.fetchall():
-            history.append({
-                'version': row[0],
-                'type': 'base' if row[1] else 'delta',
-                'status': row[2],
-                'timestamp': row[3],
-                'hash': row[4][:16] + '...',  # Shortened hash
-                'stored_size': row[5]
-            })
-        
-        conn.close()
-        return history
+        with self._connect() as cursor:
+            cursor.execute('''
+                SELECT v.version_number, v.is_base, v.http_status,
+                       v.fetched_at, v.content_hash,
+                       LENGTH(v.content) as stored_size
+                FROM versions v
+                JOIN pages p ON v.page_id = p.id
+                WHERE p.url = ?
+                ORDER BY v.version_number DESC
+            ''', (url,))
+
+            history = []
+            for row in cursor.fetchall():
+                history.append({
+                    'version': row[0],
+                    'type': 'base' if row[1] else 'delta',
+                    'status': row[2],
+                    'timestamp': row[3],
+                    'hash': row[4][:16] + '...',  # Shortened hash
+                    'stored_size': row[5]
+                })
+
+            return history
 
     def get_all_pages(self) -> list:
         """Get all monitored pages with version counts."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        with self._connect() as cursor:
+            cursor.execute('''
+                SELECT p.id, p.url, p.created_at, COUNT(v.id) as version_count
+                FROM pages p
+                LEFT JOIN versions v ON p.id = v.page_id
+                GROUP BY p.id
+                ORDER BY p.created_at DESC
+            ''')
 
-        cursor.execute('''
-            SELECT p.id, p.url, p.created_at, COUNT(v.id) as version_count
-            FROM pages p
-            LEFT JOIN versions v ON p.id = v.page_id
-            GROUP BY p.id
-            ORDER BY p.created_at DESC
-        ''')
+            pages = []
+            for row in cursor.fetchall():
+                pages.append({
+                    'id': row[0],
+                    'url': row[1],
+                    'created_at': row[2],
+                    'versions': row[3]
+                })
 
-        pages = []
-        for row in cursor.fetchall():
-            pages.append({
-                'id': row[0],
-                'url': row[1],
-                'created_at': row[2],
-                'versions': row[3]
-            })
-
-        conn.close()
-        return pages
+            return pages
     
+    def get_page_by_id(self, page_id: int) -> Optional[Dict]:
+        """Get page details by its ID."""
+        with self._connect() as cursor:
+            cursor.execute('SELECT id, url, created_at FROM pages WHERE id = ?', (page_id,))
+            result = cursor.fetchone()
+
+            if result:
+                return {
+                    'id': result[0],
+                    'url': result[1],
+                    'created_at': result[2]
+                }
+            return None
+
     def compare_versions(self, url: str, version1: int, version2: int) -> str:
         """Get a unified diff between two versions."""
         page_id = self._get_page_id(url)
@@ -485,71 +486,3 @@ class WebPageArchiver:
         return ''.join(diff)
 
 
-# Example usage and testing
-def main():
-    """Demonstration of the web archiver."""
-    
-    archiver = WebPageArchiver('web_archive.db')
-    
-    # Example URLs to monitor
-    test_urls = [
-        'https://example.com',
-        'https://news.ycombinator.com',
-    ]
-    
-    print("=" * 70)
-    print("Web Page Archival System - Demo")
-    print("=" * 70)
-    
-    for url in test_urls:
-        print(f"\n📄 Archiving: {url}")
-        print("-" * 70)
-        
-        # First archive
-        result = archiver.archive_page(url, strip_ads=True)
-        print(f"Status: {result['status']}")
-        
-        if result['status'] == 'archived':
-            print(f"Version: {result['version']} ({result['storage_type']})")
-            print(f"Original size: {result['original_size']:,} bytes")
-            print(f"Stored size: {result['stored_size']:,} bytes")
-            print(f"Compression: {result['compression_ratio']}")
-        
-        # Show version history
-        print("\n📚 Version History:")
-        history = archiver.get_version_history(url)
-        for ver in history:
-            print(f"  v{ver['version']} [{ver['type']}] - {ver['timestamp']} "
-                  f"({ver['stored_size']:,} bytes) - {ver['hash']}")
-        
-        print()
-    
-    print("\n" + "=" * 70)
-    print("Demonstration: Monitoring for changes")
-    print("=" * 70)
-    
-    # Simulate monitoring by fetching again
-    test_url = test_urls[0]
-    print(f"\n🔍 Re-checking: {test_url}")
-    result = archiver.archive_page(test_url)
-    print(f"Status: {result['status']}")
-    print(f"Message: {result['message']}")
-    
-    # Demonstrate version retrieval
-    if history:
-        print(f"\n📖 Retrieving version 1 content (first 500 chars):")
-        print("-" * 70)
-        page_id = archiver._get_page_id(test_url)
-        content = archiver.get_version_content(page_id, 1)
-        if content:
-            print(content[:500])
-            print("...")
-            # Verify asset embedding
-            if "data:image" in content:
-                print("\n✓ Image embedding verified.")
-            if "<style>" in content:
-                print("✓ CSS embedding verified.")
-
-
-if __name__ == '__main__':
-    main()
