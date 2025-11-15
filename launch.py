@@ -2,13 +2,13 @@
 from archiver import WebPageArchiver
 
 # Initialize archiver
-archiver = WebPageArchiver('my_archive.db')
+archiver = WebPageArchiver('websites.db')
+
+import json
 
 # List of URLs to monitor
-urls_to_monitor = [
-    'https://example.com',
-    'https://news.ycombinator.com',
-]
+with open('sites.json', 'r') as f:
+    urls_to_monitor = json.load(f)
 
 print("=" * 70)
 print("Web Page Archiver - Launch")
