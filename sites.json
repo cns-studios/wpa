@@ -1,4 +1,16 @@
-[
-    "https://example.com",
-    "https://news.ycombinator.com"
-]
+{
+    "https://example.com": [
+        "https://iana.org/domains/example"
+    ],
+    "https://news.ycombinator.com": [
+        "https://news.ycombinator.com/news",
+        "https://news.ycombinator.com/newest",
+        "https://news.ycombinator.com/front",
+        "https://news.ycombinator.com/newcomments",
+        "https://news.ycombinator.com/ask",
+        "https://news.ycombinator.com/show",
+        "https://news.ycombinator.com/jobs",
+        "https://news.ycombinator.com/submit",
+        "https://news.ycombinator.com/login?goto=news"
+    ]
+}

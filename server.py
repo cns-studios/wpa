@@ -8,9 +8,9 @@ archiver = WebPageArchiver('websites.db')
 def index():
     query = request.args.get('query')
     if query:
-        pages = [page for page in archiver.get_all_pages() if query.lower() in page['url'].lower()]
+        pages = [page for page in archiver.get_base_pages() if query.lower() in page['url'].lower()]
     else:
-        pages = archiver.get_all_pages()
+        pages = archiver.get_base_pages()
     return render_template('index.html', pages=pages)
 
 @app.route('/site/<int:page_id>')
