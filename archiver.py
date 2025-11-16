@@ -170,17 +170,29 @@ class WebPageArchiver:
         # Gather CSS
         for link in soup.find_all('link', rel='stylesheet'):
             if link.has_attr('href'):
-                assets_to_fetch.append(urljoin(page_url, link['href']))
+                try:
+                    assets_to_fetch.append(urljoin(page_url, link['href']))
+                except ValueError:
+                    print(f"  -> Warning: Malformed CSS link skipped: {link['href']}")
+                    continue
 
         # Gather JS
         for script in soup.find_all('script', src=True):
-            assets_to_fetch.append(urljoin(page_url, script['src']))
+            try:
+                assets_to_fetch.append(urljoin(page_url, script['src']))
+            except ValueError:
+                print(f"  -> Warning: Malformed JS link skipped: {script['src']}")
+                continue
 
         # Gather images
         for img in soup.find_all('img', src=True):
-            img_url = urljoin(page_url, img['src'])
-            if urlparse(img_url).scheme:
-                assets_to_fetch.append(img_url)
+            try:
+                img_url = urljoin(page_url, img['src'])
+                if urlparse(img_url).scheme:
+                    assets_to_fetch.append(img_url)
+            except ValueError:
+                print(f"  -> Warning: Malformed image link skipped: {img['src']}")
+                continue
 
         # Fetch assets in parallel
         fetched_assets = {}
@@ -197,25 +209,34 @@ class WebPageArchiver:
         # Replace links with embedded content
         for link in soup.find_all('link', rel='stylesheet'):
             if link.has_attr('href'):
-                css_url = urljoin(page_url, link['href'])
-                if css_url in fetched_assets:
-                    css_content, _ = fetched_assets[css_url]
-                    style_tag = soup.new_tag('style')
-                    style_tag.string = css_content.decode('utf-8', 'ignore')
-                    link.replace_with(style_tag)
+                try:
+                    css_url = urljoin(page_url, link['href'])
+                    if css_url in fetched_assets:
+                        css_content, _ = fetched_assets[css_url]
+                        style_tag = soup.new_tag('style')
+                        style_tag.string = css_content.decode('utf-8', 'ignore')
+                        link.replace_with(style_tag)
+                except ValueError:
+                    continue
 
         for script in soup.find_all('script', src=True):
-            js_url = urljoin(page_url, script['src'])
-            if js_url in fetched_assets:
-                js_content, _ = fetched_assets[js_url]
-                script.string = js_content.decode('utf-8', 'ignore')
-                del script['src']
+            try:
+                js_url = urljoin(page_url, script['src'])
+                if js_url in fetched_assets:
+                    js_content, _ = fetched_assets[js_url]
+                    script.string = js_content.decode('utf-8', 'ignore')
+                    del script['src']
+            except ValueError:
+                continue
 
         for img in soup.find_all('img', src=True):
-            img_url = urljoin(page_url, img['src'])
-            if img_url in fetched_assets:
-                img_data, mime_type = fetched_assets[img_url]
-                img['src'] = f"data:{mime_type};base64,{base64.b64encode(img_data).decode('utf-8')}"
+            try:
+                img_url = urljoin(page_url, img['src'])
+                if img_url in fetched_assets:
+                    img_data, mime_type = fetched_assets[img_url]
+                    img['src'] = f"data:{mime_type};base64,{base64.b64encode(img_data).decode('utf-8')}"
+            except ValueError:
+                continue
 
         return str(soup)
     
@@ -376,14 +397,18 @@ class WebPageArchiver:
         soup = BeautifulSoup(html, 'html.parser')
         for a_tag in soup.find_all('a', href=True):
             link = a_tag['href']
-            abs_link = urljoin(page_url, link)
-            if abs_link.startswith('http'):
-                with self._connect() as cursor:
-                    cursor.execute('SELECT id FROM pages WHERE url = ?', (abs_link,))
-                    result = cursor.fetchone()
-                    if result:
-                        sub_page_id = result[0]
-                        a_tag['href'] = f"/site/{sub_page_id}"
+            try:
+                abs_link = urljoin(page_url, link)
+                if abs_link.startswith('http'):
+                    with self._connect() as cursor:
+                        cursor.execute('SELECT id FROM pages WHERE url = ?', (abs_link,))
+                        result = cursor.fetchone()
+                        if result:
+                            sub_page_id = result[0]
+                            a_tag['href'] = f"/site/{sub_page_id}"
+            except ValueError:
+                print(f"  -> Warning: Malformed link skipped: {link}")
+                continue
         return str(soup)
 
     def _discover_and_archive_linked_pages(self, html: str, page_url: str, parent_id: int, visited_urls: set, current_depth: int, max_depth: int) -> str:
@@ -398,16 +423,20 @@ class WebPageArchiver:
                 break
 
             link = a_tag['href']
-            abs_link = urljoin(page_url, link)
+            try:
+                abs_link = urljoin(page_url, link)
 
-            # Only archive http and https links
-            if abs_link.startswith('http'):
-                print(f"  -> Found link: {abs_link}")
+                # Only archive http and https links
+                if abs_link.startswith('http'):
+                    print(f"  -> Found link: {abs_link}")
 
-                # Archive the linked page
-                self.archive_page(abs_link, parent_id=parent_id, visited_urls=visited_urls, current_depth=current_depth + 1, max_depth=max_depth)
+                    # Archive the linked page
+                    self.archive_page(abs_link, parent_id=parent_id, visited_urls=visited_urls, current_depth=current_depth + 1, max_depth=max_depth)
 
-                subdomain_count += 1
+                    subdomain_count += 1
+            except ValueError:
+                print(f"  -> Warning: Malformed link skipped: {link}")
+                continue
 
         return str(soup)
     
