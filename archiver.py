@@ -10,6 +10,8 @@ from diff_match_patch import diff_match_patch
 import hashlib
 import base64
 from urllib.parse import urljoin, urlparse
+from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
 
 
 class WebPageArchiver:
@@ -143,49 +145,71 @@ class WebPageArchiver:
         
         return str(soup)
 
-    def _get_asset_content(self, url: str) -> Optional[Tuple[bytes, str]]:
-        """Fetch asset content and return as (data, mime_type)."""
+    def _get_asset_content(self, url: str) -> Optional[Tuple[str, bytes, str]]:
+        """Fetch asset content and return as (url, data, mime_type)."""
         try:
             response = requests.get(url, timeout=15)
             if response.status_code == 200:
-                return response.content, response.headers.get('Content-Type', '')
-        except requests.RequestException as e:
-            print(f"Failed to fetch asset {url}: {e}")
+                return url, response.content, response.headers.get('Content-Type', '')
+        except requests.RequestException:
+            # Quieter fail for assets
+            pass
         return None
 
     def _embed_assets(self, html: str, page_url: str) -> str:
-        """Embed external CSS, JS, and images as data URIs."""
+        """Embed external CSS, JS, and images as data URIs in parallel."""
         soup = BeautifulSoup(html, 'html.parser')
 
-        # Embed CSS
+        assets_to_fetch = []
+
+        # Gather CSS
+        for link in soup.find_all('link', rel='stylesheet'):
+            if link.has_attr('href'):
+                assets_to_fetch.append(urljoin(page_url, link['href']))
+
+        # Gather JS
+        for script in soup.find_all('script', src=True):
+            assets_to_fetch.append(urljoin(page_url, script['src']))
+
+        # Gather images
+        for img in soup.find_all('img', src=True):
+            img_url = urljoin(page_url, img['src'])
+            if urlparse(img_url).scheme:
+                assets_to_fetch.append(img_url)
+
+        # Fetch assets in parallel
+        fetched_assets = {}
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            with tqdm(total=len(assets_to_fetch), desc="Embedding Assets", unit="asset", leave=False) as pbar:
+                futures = [executor.submit(self._get_asset_content, url) for url in assets_to_fetch]
+                for future in futures:
+                    result = future.result()
+                    if result:
+                        url, data, mime_type = result
+                        fetched_assets[url] = (data, mime_type)
+                    pbar.update(1)
+
+        # Replace links with embedded content
         for link in soup.find_all('link', rel='stylesheet'):
             if link.has_attr('href'):
                 css_url = urljoin(page_url, link['href'])
-                asset = self._get_asset_content(css_url)
-                if asset:
-                    css_content, _ = asset
+                if css_url in fetched_assets:
+                    css_content, _ = fetched_assets[css_url]
                     style_tag = soup.new_tag('style')
-                    style_tag.string = css_content.decode('utf-8')
+                    style_tag.string = css_content.decode('utf-8', 'ignore')
                     link.replace_with(style_tag)
 
-        # Embed JS
         for script in soup.find_all('script', src=True):
             js_url = urljoin(page_url, script['src'])
-            asset = self._get_asset_content(js_url)
-            if asset:
-                js_content, _ = asset
-                script.string = js_content.decode('utf-8')
+            if js_url in fetched_assets:
+                js_content, _ = fetched_assets[js_url]
+                script.string = js_content.decode('utf-8', 'ignore')
                 del script['src']
 
-        # Embed images
         for img in soup.find_all('img', src=True):
             img_url = urljoin(page_url, img['src'])
-            if not urlparse(img_url).scheme:
-                continue # Skip relative paths that don't resolve
-
-            asset = self._get_asset_content(img_url)
-            if asset:
-                img_data, mime_type = asset
+            if img_url in fetched_assets:
+                img_data, mime_type = fetched_assets[img_url]
                 img['src'] = f"data:{mime_type};base64,{base64.b64encode(img_data).decode('utf-8')}"
 
         return str(soup)
