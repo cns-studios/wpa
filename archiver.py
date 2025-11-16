@@ -297,7 +297,7 @@ class WebPageArchiver:
                 }
             return None
     
-    def archive_page(self, url: str, strip_ads: bool = True, parent_id: Optional[int] = None, visited_urls: set = None, current_depth: int = 0, max_depth: int = 1) -> Dict:
+    def archive_page(self, url: str, strip_ads: bool = True, parent_id: Optional[int] = None, visited_urls: set = None, current_depth: int = 0, max_depth: int = 1, discovery_mode: bool = True) -> Dict:
         """
         Archive a page, storing only the delta if it changed.
         
@@ -352,9 +352,10 @@ class WebPageArchiver:
             content = self._strip_ads(content)
 
         # Discover and archive linked pages before embedding assets
-        if current_depth < max_depth:
+        if discovery_mode and current_depth < max_depth:
             content = self._discover_and_archive_linked_pages(content, url, page_id, visited_urls, current_depth, max_depth)
 
+        content = self._rewrite_links(content, url)
         content = self._embed_assets(content, url)
         
         # Check if content actually changed (hash comparison)
@@ -369,6 +370,21 @@ class WebPageArchiver:
         
         # Store the new version
         return self._store_version(page_id, content, metadata, latest)
+
+    def _rewrite_links(self, html: str, page_url: str) -> str:
+        """Rewrite links to point to the local archive."""
+        soup = BeautifulSoup(html, 'html.parser')
+        for a_tag in soup.find_all('a', href=True):
+            link = a_tag['href']
+            abs_link = urljoin(page_url, link)
+            if abs_link.startswith('http'):
+                with self._connect() as cursor:
+                    cursor.execute('SELECT id FROM pages WHERE url = ?', (abs_link,))
+                    result = cursor.fetchone()
+                    if result:
+                        sub_page_id = result[0]
+                        a_tag['href'] = f"/site/{sub_page_id}"
+        return str(soup)
 
     def _discover_and_archive_linked_pages(self, html: str, page_url: str, parent_id: int, visited_urls: set, current_depth: int, max_depth: int) -> str:
         """Discover, archive, and rewrite links to subdomains."""
@@ -389,11 +405,7 @@ class WebPageArchiver:
                 print(f"  -> Found link: {abs_link}")
 
                 # Archive the linked page
-                sub_page_id = self._get_page_id(abs_link)
                 self.archive_page(abs_link, parent_id=parent_id, visited_urls=visited_urls, current_depth=current_depth + 1, max_depth=max_depth)
-
-                # Rewrite the link to point to the local archive
-                a_tag['href'] = f"/site/{sub_page_id}"
 
                 subdomain_count += 1
 
@@ -541,6 +553,29 @@ class WebPageArchiver:
 
             return pages
     
+    def get_base_pages(self) -> list:
+        """Get all monitored base pages with version counts."""
+        with self._connect() as cursor:
+            cursor.execute('''
+                SELECT p.id, p.url, p.created_at, COUNT(v.id) as version_count
+                FROM pages p
+                LEFT JOIN versions v ON p.id = v.page_id
+                WHERE p.id NOT IN (SELECT child_page_id FROM page_relationships)
+                GROUP BY p.id
+                ORDER BY p.created_at DESC
+            ''')
+
+            pages = []
+            for row in cursor.fetchall():
+                pages.append({
+                    'id': row[0],
+                    'url': row[1],
+                    'created_at': row[2],
+                    'versions': row[3]
+                })
+
+            return pages
+
     def get_page_by_id(self, page_id: int) -> Optional[Dict]:
         """Get page details by its ID."""
         with self._connect() as cursor:
