@@ -34,7 +34,7 @@
         </table>
 
         {% if children %}
-        <h2>Archived Subdomains</h2>
+        <h2>Archived Linked Pages</h2>
         <ul>
             {% for child in children %}
             <li><a href="{{ url_for('site', page_id=child.id) }}">{{ child.url }}</a></li>

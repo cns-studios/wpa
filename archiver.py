@@ -159,13 +159,14 @@ class WebPageArchiver:
 
         # Embed CSS
         for link in soup.find_all('link', rel='stylesheet'):
-            css_url = urljoin(page_url, link['href'])
-            asset = self._get_asset_content(css_url)
-            if asset:
-                css_content, _ = asset
-                style_tag = soup.new_tag('style')
-                style_tag.string = css_content.decode('utf-8')
-                link.replace_with(style_tag)
+            if link.has_attr('href'):
+                css_url = urljoin(page_url, link['href'])
+                asset = self._get_asset_content(css_url)
+                if asset:
+                    css_content, _ = asset
+                    style_tag = soup.new_tag('style')
+                    style_tag.string = css_content.decode('utf-8')
+                    link.replace_with(style_tag)
 
         # Embed JS
         for script in soup.find_all('script', src=True):
@@ -267,7 +268,7 @@ class WebPageArchiver:
                 }
             return None
     
-    def archive_page(self, url: str, strip_ads: bool = True, parent_id: Optional[int] = None, visited_urls: set = None) -> Dict:
+    def archive_page(self, url: str, strip_ads: bool = True, parent_id: Optional[int] = None, visited_urls: set = None, current_depth: int = 0, max_depth: int = 1) -> Dict:
         """
         Archive a page, storing only the delta if it changed.
         
@@ -321,8 +322,9 @@ class WebPageArchiver:
         if strip_ads:
             content = self._strip_ads(content)
 
-        # Discover and archive subdomains before embedding assets
-        content = self._discover_and_archive_subdomains(content, url, page_id, visited_urls)
+        # Discover and archive linked pages before embedding assets
+        if current_depth < max_depth:
+            content = self._discover_and_archive_linked_pages(content, url, page_id, visited_urls, current_depth, max_depth)
 
         content = self._embed_assets(content, url)
         
@@ -339,23 +341,21 @@ class WebPageArchiver:
         # Store the new version
         return self._store_version(page_id, content, metadata, latest)
 
-    def _discover_and_archive_subdomains(self, html: str, page_url: str, parent_id: int, visited_urls: set) -> str:
+    def _discover_and_archive_linked_pages(self, html: str, page_url: str, parent_id: int, visited_urls: set, current_depth: int, max_depth: int) -> str:
         """Discover, archive, and rewrite links to subdomains."""
         soup = BeautifulSoup(html, 'html.parser')
-        base_domain = urlparse(page_url).netloc
 
         for a_tag in soup.find_all('a', href=True):
             link = a_tag['href']
             abs_link = urljoin(page_url, link)
-            link_domain = urlparse(abs_link).netloc
 
-            # Check if it's a subdomain and not the same domain
-            if link_domain.endswith(base_domain) and link_domain != base_domain:
-                print(f"  -> Found subdomain: {abs_link}")
+            # Only archive http and https links
+            if abs_link.startswith('http'):
+                print(f"  -> Found link: {abs_link}")
 
-                # Archive the subdomain page
+                # Archive the linked page
                 sub_page_id = self._get_page_id(abs_link)
-                self.archive_page(abs_link, parent_id=parent_id, visited_urls=visited_urls)
+                self.archive_page(abs_link, parent_id=parent_id, visited_urls=visited_urls, current_depth=current_depth + 1, max_depth=max_depth)
 
                 # Rewrite the link to point to the local archive
                 a_tag['href'] = f"/site/{sub_page_id}"
