@@ -2,6 +2,7 @@ import requests
 import sqlite3
 import gzip
 import json
+import os
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Optional, Dict, Tuple
@@ -12,6 +13,9 @@ import base64
 from urllib.parse import urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 class WebPageArchiver:
@@ -36,6 +40,7 @@ class WebPageArchiver:
         """Initialize the archiver with a database."""
         self.db_path = db_path
         self.dmp = diff_match_patch()
+        self.subdomain_limit = int(os.getenv('SUBDOMAIN_LIMIT', 10))
         self._init_database()
     
     @contextmanager
@@ -369,7 +374,13 @@ class WebPageArchiver:
         """Discover, archive, and rewrite links to subdomains."""
         soup = BeautifulSoup(html, 'html.parser')
 
+        subdomain_count = 0
+
         for a_tag in soup.find_all('a', href=True):
+            if subdomain_count >= self.subdomain_limit:
+                print(f"  -> Subdomain limit ({self.subdomain_limit}) reached. Halting link discovery.")
+                break
+
             link = a_tag['href']
             abs_link = urljoin(page_url, link)
 
@@ -383,6 +394,8 @@ class WebPageArchiver:
 
                 # Rewrite the link to point to the local archive
                 a_tag['href'] = f"/site/{sub_page_id}"
+
+                subdomain_count += 1
 
         return str(soup)
     
