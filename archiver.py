@@ -473,7 +473,7 @@ class WebPageArchiver:
         
         original_size = len(content.encode('utf-8'))
         compressed_size = len(compressed_content)
-        compression_ratio = (1 - compressed_size / original_size) * 100
+        compression_ratio = (1 - compressed_size / original_size) * 100 if original_size > 0 else 0.0
         
         return {
             'status': 'archived',
