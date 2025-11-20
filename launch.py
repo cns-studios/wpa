@@ -41,7 +41,6 @@ def main():
             for url in urls_to_update:
                 print(f"\n🔗 Processing: {url}")
                 result = archiver.archive_page(url, strip_ads=True, visited_urls=set(), max_depth=1, discovery_mode=False)
-                print_status(result, archiver)
 
 def print_status(result, archiver):
     """Prints the status of the archival process."""
@@ -80,4 +79,3 @@ def print_status(result, archiver):
 
 if __name__ == '__main__':
     main()
-

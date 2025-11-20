@@ -47,12 +47,16 @@ This delta-based approach ensures that only the changes are stored, making the s
    ```
 
 2. **Configure the archiver:**
-   - Add the URLs you want to monitor to the `sites.json` file.
+   - Add the URLs you want to monitor to the `sites.json` file:
+      ```json
+     {
+       "https://example.com": null
+     } 
+      ```
    - (Optional) Create a `.env` file to configure the subdomain limit:
      ```
      SUBDOMAIN_LIMIT=10
      ```
-
 3. **Build and run the Docker containers:**
    ```bash
    docker-compose up --build
@@ -67,5 +71,4 @@ This delta-based approach ensures that only the changes are stored, making the s
 
 - [ ] **Improved diff visualization:** Implement a more user-friendly side-by-side diff view in the web interface.
 - [ ] **Full-text search:** Add the ability to search the content of all archived pages.
-- [ ] **User authentication:** Add a login system to protect the web interface.
 - [ ] **Support for more content types:** Add support for archiving PDFs, images, and other file types.
